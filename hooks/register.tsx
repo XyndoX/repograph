@@ -34,7 +34,8 @@ const S = {
   hover: '',
   local: true, // a focus narrows the graph to its neighbourhood
   orphans: false,
-  depth: 1,
+  depth: 1, // rings around a focus
+  levels: 2, // folders mode: how deep the folder map splits
   pixels: true,
   cam: { cx: 0.5, cy: 0.5, z: 1 },
   center: '',
@@ -60,6 +61,37 @@ const S = {
   poll: null as { cancel: () => void } | null,
 }
 const redraw = ($: EngineInterface) => $.ui.invalidate('ui.render')
+
+// Pointer moves, drags and wheel turns come fast; draw at most every 40 ms.
+let soonPending = false
+function soon($: EngineInterface) {
+  if (soonPending) return
+  soonPending = true
+  $.clock.after(40, () => { soonPending = false; redraw($) })
+}
+
+// The picture goes to the terminal as a file it reads itself, so the drawing
+// tree carries a path, not megabytes of pixels. Two files take turns, so the
+// terminal never reads one half-written.
+const RUN_ID = Math.random().toString(36).slice(2, 8)
+const pic = { key: '', ready: null as null | { file: string; width: number; height: number; generation: number }, gen: 0, inline: false }
+async function ensurePicture($: EngineInterface, img: { rgba: string; width: number; height: number; key: string }) {
+  if (pic.key === img.key || pic.inline) return
+  pic.key = img.key
+  const gen = pic.gen + 1
+  try {
+    const tmp = ((await $.env.get('TMPDIR')) || '/tmp').replace(/\/$/, '')
+    const file = `${tmp}/repograph-${RUN_ID}-${gen % 2}.rgba`
+    const r = await $.process.run(['/bin/sh', '-c', 'base64 -d > "$1"', 'sh', file], { stdin: img.rgba, timeoutMs: 10_000 })
+    if (r.exitCode !== 0) throw new Error(r.stderr)
+    if (pic.key !== img.key) return // a newer picture is on its way
+    pic.gen = gen
+    pic.ready = { file, width: img.width, height: img.height, generation: gen }
+  } catch {
+    pic.inline = true // no shell to write with: send the pixels inline instead
+  }
+  redraw($)
+}
 const resetCam = () => { S.cam = { cx: 0.5, cy: 0.5, z: 1 } }
 
 async function topOf($: EngineInterface): Promise<string> {
@@ -223,8 +255,8 @@ async function key($: EngineInterface, k: string) {
     else if (k === '-' || k === '_') S.cam.z = Math.max(0.3, S.cam.z / 1.25)
     else if (k === '0') resetCam()
     else if (k === 'm') { S.mode = MODES[(MODES.indexOf(S.mode) + 1) % MODES.length]!; resetCam(); if (S.focus) S.center = S.focus.split('#')[0]! }
-    else if (k === ']') S.depth = Math.min(5, S.depth + 1)
-    else if (k === '[') S.depth = Math.max(1, S.depth - 1)
+    else if (k === ']') { if (S.mode === 'folders') S.levels = Math.min(6, S.levels + 1); else S.depth = Math.min(5, S.depth + 1) }
+    else if (k === '[') { if (S.mode === 'folders') S.levels = Math.max(1, S.levels - 1); else S.depth = Math.max(1, S.depth - 1) }
     else if (k === 'g') { S.local = !S.local; resetCam(); if (S.focus) S.center = S.focus }
     else if (k === 'o') S.orphans = !S.orphans
     else if (k === 'p') S.pixels = !S.pixels
@@ -395,10 +427,10 @@ export const register: Register = on => {
       const scale = Math.min(S.box.cols * cw, S.box.rows * ch) * (S.pixels ? 0.92 : 1) * S.cam.z
       S.cam.cx -= (data.drag[0] * cw) / scale
       S.cam.cy -= (data.drag[1] * ch) / scale
-      redraw($)
+      soon($)
     } else if ('hover' in data && S.tab === 'graph') {
       const id = data.hover ? (S.drawn?.hit(data.hover[0], data.hover[1]) ?? '') : ''
-      if (id !== S.hover) { S.hover = id; redraw($) }
+      if (id !== S.hover) { S.hover = id; soon($) }
     }
     return {}
   })
@@ -407,7 +439,7 @@ export const register: Register = on => {
     if (S.tab === 'graph') S.cam.z = Math.max(0.3, Math.min(12, S.cam.z * (e.by < 0 ? 1.06 : 1 / 1.06)))
     else if (S.tab === 'changes') S.diffTop = Math.max(0, S.diffTop + Math.sign(e.by) * 3)
     else S.top = Math.max(0, S.top + Math.sign(e.by) * 3)
-    redraw($)
+    soon($)
     return {}
   })
 
@@ -485,7 +517,7 @@ export const register: Register = on => {
     const rows = Math.max(6, height - 7)
     S.box = { cols, rows }
     const pixels = S.pixels && e.surface === 'terminal'
-    const input = { mode: S.mode, scope: S.scope, focus: S.focus, depth: S.depth, local: S.local, orphans: S.orphans, cap: GLOBAL_CAP }
+    const input = { mode: S.mode, scope: S.scope, focus: S.focus, depth: S.depth, levels: S.levels, local: S.local, orphans: S.orphans, cap: GLOBAL_CAP }
     let d = draw(g, input, S.cam, cols, rows, pixels, S.hover, S.touched)
     if (S.center) {
       const p = d.centre(S.center) ?? d.centre(d.v.seeds[0] ?? '')
@@ -503,9 +535,11 @@ export const register: Register = on => {
     const focusNode = nodeById.get(v.seeds[0] ?? '')
     const hovered = nodeById.get(S.hover)
     const Image = e.surface === 'terminal' ? ($.ui.resolve(e) as { Image?: (p: object) => unknown }).Image : undefined
+    if (pixels && d.image) void ensurePicture($, d.image)
+    const source = pic.inline && d.image ? { rgba: d.image.rgba, width: d.image.width, height: d.image.height } : pic.ready ? { ...pic.ready, format: 'rgba' as const } : null
     const picture =
-      pixels && d.image && Image ? (
-        <Image key="graph-image" source={d.image} columns={cols} rows={rows} alt="repo graph" />
+      pixels && Image ? (
+        source ? <Image key="graph-image" source={source} columns={cols} rows={rows} alt="repo graph" /> : <Box width={cols} height={rows} />
       ) : (
         <Client key="canvas" module="./canvas.tsx" props={{ rows: d.text ?? [] } satisfies CanvasProps} />
       )
@@ -538,7 +572,7 @@ export const register: Register = on => {
         <Button key="mode" plain dimColor label={`${S.mode} ⇄`} onPress={() => void key($, 'm')} />
         <Text> </Text>
         <Button key="depth-down" plain dimColor label="‹" onPress={() => void key($, '[')} />
-        <Text color={C.fg}>{` depth ${S.depth} `}</Text>
+        <Text color={C.fg}>{S.mode === 'folders' ? ` levels ${S.levels} ` : ` depth ${S.depth} `}</Text>
         <Button key="depth-up" plain dimColor label="›" onPress={() => void key($, ']')} />
       </Box>,
       <Input key="find" label="/ " placeholder={S.mode === 'functions' ? 'find a function' : 'find a file'} submitLabel="focus" value="" onSubmit={(q: string) => { find(q); redraw($) }} />,
@@ -555,7 +589,7 @@ export const register: Register = on => {
       </Box>,
       ...lines,
       <Box flexGrow={1} />,
-      <Text color={C.muted} wrap="truncate-end">click: focus · again: open folder · drag · wheel zoom · [ ] depth · m mode · u up · g near/all · o unlinked · p pixels/text · esc</Text>,
+      <Text color={C.muted} wrap="truncate-end">click: focus · again: open folder · drag · wheel zoom · [ ] levels/depth · m mode · u up · g near/all · o unlinked · p pixels/text · esc</Text>,
     )
   })
 }

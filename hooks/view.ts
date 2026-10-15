@@ -5,7 +5,7 @@ import type { Graph } from './scan'
 export type Mode = 'folders' | 'files' | 'functions'
 export type VNode = { id: string; label: string; group: string; kind: 'file' | 'fn' | 'folder' | 'outside'; file: string }
 export type VEdge = { a: string; b: string; w: number }
-export type ViewInput = { mode: Mode; scope: string; focus: string; depth: number; local: boolean; orphans: boolean; cap: number }
+export type ViewInput = { mode: Mode; scope: string; focus: string; depth: number; levels: number; local: boolean; orphans: boolean; cap: number }
 
 const inside = (scope: string, f: string) => !scope || f.startsWith(scope + '/')
 const top = (f: string) => (f.includes('/') ? f.split('/')[0]! : '.')
@@ -20,11 +20,14 @@ export function bucket(scope: string, f: string): string {
   return p.slice(0, i + 1).join('/')
 }
 
-// Inside the scope, folders mode draws each child folder of the scope as one node.
-function child(scope: string, f: string): { id: string; folder: boolean } {
+// Inside the scope, folders mode draws each folder `levels` deep below the scope
+// as one node; files that sit higher up stay single nodes.
+function child(scope: string, f: string, levels: number): { id: string; label: string; folder: boolean } {
   const rel = scope ? f.slice(scope.length + 1) : f
-  const cut = rel.indexOf('/')
-  return cut < 0 ? { id: f, folder: false } : { id: (scope ? scope + '/' : '') + rel.slice(0, cut), folder: true }
+  const dirs = rel.split('/').slice(0, -1)
+  if (!dirs.length) return { id: f, label: rel, folder: false }
+  const sub = dirs.slice(0, levels).join('/')
+  return { id: (scope ? scope + '/' : '') + sub, label: sub + '/', folder: true }
 }
 
 export function view(g: Graph, v: ViewInput) {
@@ -42,8 +45,8 @@ export function view(g: Graph, v: ViewInput) {
       return key
     }
     if (v.mode === 'folders') {
-      const c = child(v.scope, file)
-      if (!nodes.has(c.id)) nodes.set(c.id, { id: c.id, label: c.id.split('/').pop()! + (c.folder ? '/' : ''), group: top(file), kind: c.folder ? 'folder' : 'file', file: c.id })
+      const c = child(v.scope, file, v.levels)
+      if (!nodes.has(c.id)) nodes.set(c.id, { id: c.id, label: c.label, group: top(file), kind: c.folder ? 'folder' : 'file', file: c.id })
       return c.id
     }
     const n = byId.get(id)!

@@ -1,6 +1,6 @@
 {
   "name": "repograph",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "An Obsidian-style graph of your repo in a Claude Code pane: file imports and function calls, with Files and Changes tabs beside it",
   "author": { "name": "XyndoX" },
   "repository": "https://github.com/XyndoX/repograph",

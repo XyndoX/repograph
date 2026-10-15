@@ -5,7 +5,8 @@ A Claude Code mod that puts your repo in a side pane with three tabs: **Files**,
 - **Graph tab**: drawn in real pixels in terminals with the kitty graphics protocol (**Ghostty, cmux, kitty**): soft anti-aliased lines, round nodes, labels as crisp terminal text on top. Elsewhere (tmux, iTerm2) `p` switches to a braille text drawing.
   - Three levels, `m` cycles them: **folders** (a map of the repo: each folder one node, links summed), **files** (imports), **functions** (calls). A big repo opens on folders.
   - **Scope**: click a folder node twice, press `g` on a folder in the Files tab, or run `/repograph apps/web`. The graph then shows what's inside that folder, and everything it links to outside as hollow nodes named after the folder they leave by. The breadcrumb (`⌂ repo / apps / web`) and `u` go back up.
-  - **Focus and depth**: click a node and the graph narrows to it and its neighbours. `[` `]` (or `‹ ›`) set the depth, 1 to 5 rings. What the focus imports or calls is purple (→), what uses it is teal (←), and the bottom lines list both. `g` shows the whole graph again with the focus highlighted.
+  - **Levels** (folders mode): `[` `]` (or `‹ ›`) set how deep the folder map splits: level 1 is the top folders, level 2 their subfolders (`src/components`, `src/stores`, …), up to 6.
+  - **Focus and depth**: click a node and the graph narrows to it and its neighbours. In files and functions mode `[` `]` set the depth, 1 to 5 rings. What the focus imports or calls is purple (→), what uses it is teal (←), and the bottom lines list both. `g` shows the whole graph again with the focus highlighted.
   - Hover a node to see its path; drag to pan, wheel or `+` `-` to zoom.
 - **Files tab**: the repo's folders with link counts per file (`←` used by, `→` imports). Enter on a file shows it in the graph; `g` on a folder graphs that folder.
 - `/` search box: type a file or function name, Enter focuses and centres it.
@@ -29,7 +30,7 @@ Then `/tui fullscreen` (the pane docks to the right) and `/repograph` (or `/repo
 | click, drag, scroll | focus a node (again: open a folder), pan, zoom |
 | arrows, `+` `-`, `0` | pan, zoom, reset the view |
 | `m` | folders → files → functions |
-| `[` `]` | depth of the focus ring, 1–5 |
+| `[` `]` | folders: how many folder levels; files/functions: rings around the focus |
 | `u` | scope one folder up |
 | `g` | Graph: near the focus ⇄ everything. Files: graph this folder |
 | `o` | show nodes with no links |
@@ -56,7 +57,7 @@ The Changes tab only reads: it never stages, commits or discards, and it runs gi
 
 - **Imports**: JS/TS (relative, `.js` meaning `.ts`, `@/` and `~/` aliases, workspace packages by their `package.json` name) and Python (absolute and relative). Other languages get function nodes only.
 - **Calls**: a defined function name followed by `(` inside another function. A name resolves to the same file, then to files it imports, then to a name defined once in the repo; anything else is skipped as ambiguous.
-- **Layout**: a force layout (Fruchterman–Reingold, with hub-weighted links and a near-range repulsion like d3-force) that starts from the last positions, so a new focus moves calmly. The picture is painted in the mod (RGBA, transparent background) and shown with Claude Code's `Image` element; labels are absolutely positioned text over it, and an empty client box on top catches the pointer. The whole-repo view keeps the 350 best-connected nodes.
+- **Layout**: a force layout (Fruchterman–Reingold, with hub-weighted links and a near-range repulsion like d3-force) that starts from the last positions, so a new focus moves calmly. The picture is painted in the mod (RGBA, transparent background), written to a temp file the terminal reads itself (so the drawing tree carries a path, not megabytes), and shown with Claude Code's `Image` element; pointer moves, drags and wheel turns redraw at most every 40 ms; labels are absolutely positioned text over it, and an empty client box on top catches the pointer. The whole-repo view keeps the 350 best-connected nodes.
 
 It misses what regexes miss: dynamic dispatch, calls through objects passed around, re-exports by name. Treat it as a map, not a proof.
 

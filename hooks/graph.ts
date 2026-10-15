@@ -14,7 +14,7 @@ export type Cam = { cx: number; cy: number; z: number }
 export type Label = { x: number; y: number; text: string; color: string; bold: boolean }
 export type Drawn = {
   v: ReturnType<typeof view>
-  image?: { rgba: string; width: number; height: number }
+  image?: { rgba: string; width: number; height: number; key: string }
   text?: Seg[][]
   labels: Label[]
   hit: (x: number, y: number) => string // cell coordinates, fractions allowed
@@ -27,7 +27,7 @@ let picture = { key: '', rgba: '' }
 export function draw(g: Graph, vi: ViewInput, cam: Cam, cols: number, rows: number, pixels: boolean, hover: string, touched: Set<string>): Drawn {
   const v = view(g, vi)
   const ids = v.nodes.map(n => n.id)
-  const key = `${vi.mode}|${vi.scope}|${vi.local ? vi.focus : ''}|${vi.depth}|${ids.length}|${v.edges.length}|${ids.slice(0, 50).join(',')}`
+  const key = `${vi.mode}|${vi.scope}|${vi.local ? vi.focus : ''}|${vi.depth}|${vi.levels}|${ids.length}|${v.edges.length}|${ids.slice(0, 50).join(',')}`
   if (cache.key !== key) cache = { key, pos: layout(ids, v.edges.map(e => [e.a, e.b]), 220, cache.pos) }
   const pos = cache.pos
   const groups = [...new Set(g.files.map(n => n.group))].sort()
@@ -123,5 +123,5 @@ export function draw(g: Graph, vi: ViewInput, cam: Cam, cols: number, rows: numb
     }
     picture = { key: pkey, rgba: c.base64() }
   }
-  return { v, image: { rgba: picture.rgba, width: W, height: H }, labels, hit, centre }
+  return { v, image: { rgba: picture.rgba, width: W, height: H, key: picture.key }, labels, hit, centre }
 }

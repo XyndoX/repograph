@@ -70,7 +70,7 @@ test('git status with renames, staged and untracked files, and diff colours', ()
   expect(rows.map(r => r[0]!.t)).toEqual(['@@ -1 +1 @@', '-a', '+b'])
 })
 
-const V = { mode: 'files' as const, scope: '', focus: '', depth: 1, local: true, orphans: false, cap: 350 }
+const V = { mode: 'files' as const, scope: '', focus: '', depth: 1, levels: 1, local: true, orphans: false, cap: 350 }
 
 test('a scope keeps its files and folds the rest into the folder they leave by', () => {
   expect(bucket('apps/web', 'apps/api/x.ts')).toBe('apps/api')
@@ -87,6 +87,11 @@ test('folders mode draws child folders as nodes with links between them', () => 
   expect(ids).toContain('packages')
   expect(v.edges.some(e => e.a === 'apps' && e.b === 'packages')).toBe(true)
   expect(view(build(REPO), { ...V, mode: 'folders', scope: 'apps' }).nodes.map(n => n.id)).toContain('apps/web')
+  // Two levels split each top folder into its subfolders.
+  const deeper = view(build(REPO), { ...V, mode: 'folders', levels: 2 }).nodes.map(n => n.id)
+  expect(deeper).toContain('apps/web')
+  expect(deeper).toContain('packages/engine')
+  expect(deeper).not.toContain('apps')
 })
 
 test('depth widens the focus ring; depth 1 shows direct links only', () => {
@@ -130,6 +135,7 @@ test('the pane scans the repo, shows the graph, and the tabs swap views', { time
   const root = '/work/repo'
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   mock.store(on)
+  mock.env(on, { TMPDIR: '/tmp/' })
   on('session.cwd', () => ({ value: root }))
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: undefined }))
@@ -152,6 +158,8 @@ test('the pane scans the repo, shows the graph, and the tabs swap views', { time
   for (const word of ['Files', 'Graph', '6 files', 'links', '1 unlinked hidden']) expect(shown).toContain(word)
 
   expect(shown).toContain('"type":"Image"')
+  expect(shown).toContain('"file":"/tmp/repograph-')
+  expect(shown).not.toContain('"rgba":')
   // Click a node: find its label laid over the picture and click just left of it.
   const tree = JSON.stringify(await ui.drawn())
   const pos = /"position":"absolute","top":(\d+),"left":(\d+)\},"children":\[\{"type":"Text","props":\{[^}]*\},"children":\["models\.py"\]/.exec(tree)

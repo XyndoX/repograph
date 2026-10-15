@@ -11,8 +11,12 @@ export function hex(h: string): RGB {
 }
 
 export class Canvas {
+  W: number
+  H: number
   px: Uint8ClampedArray
-  constructor(readonly W: number, readonly H: number) {
+  constructor(W: number, H: number) {
+    this.W = W
+    this.H = H
     this.px = new Uint8ClampedArray(W * H * 4)
   }
 
