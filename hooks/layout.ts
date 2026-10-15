@@ -15,17 +15,19 @@ function seed(id: string): number {
 // A link pulls less when it touches a hub, so hubs don't swallow their
 // neighbours (the same trick as d3-force, which Obsidian's graph uses).
 // ponytail: O(n²) per step, fine to ~500 nodes; Barnes–Hut if graphs get bigger.
-export function layout(ids: string[], edges: [string, string][], steps = 220): Pos {
+// `from` keeps nodes where an earlier layout put them, so a view that changes
+// (a new focus, a deeper ring) moves calmly instead of jumping.
+export function layout(ids: string[], edges: [string, string][], steps = 220, from?: Pos): Pos {
   const n = ids.length
   const at = new Map(ids.map((id, i) => [id, i]))
-  const x = ids.map(id => seed(id))
-  const y = ids.map(id => seed(id + '~'))
+  const x = ids.map(id => from?.get(id)?.[0] ?? seed(id))
+  const y = ids.map(id => from?.get(id)?.[1] ?? seed(id + '~'))
   const links = edges.flatMap(([a, b]) => (at.has(a) && at.has(b) && a !== b ? [[at.get(a)!, at.get(b)!]] : []))
   const deg = new Array(n).fill(0)
   for (const [a, b] of links) { deg[a!]++; deg[b!]++ }
   const k = Math.sqrt(1 / Math.max(1, n))
   const far = (4 * k) ** 2
-  let temp = 0.1
+  let temp = from && ids.some(id => from.has(id)) ? 0.04 : 0.1
   for (let s = 0; s < steps; s++) {
     const dx = new Array(n).fill(0)
     const dy = new Array(n).fill(0)

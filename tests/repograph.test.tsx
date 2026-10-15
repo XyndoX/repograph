@@ -2,6 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import { build } from '../hooks/scan'
 import { layout, nearest, raster } from '../hooks/layout'
 import { applyNumstat, diffRows, parseStatus } from '../hooks/changes'
+import { bucket, view } from '../hooks/view'
+import { Canvas } from '../hooks/paint'
 
 const REPO: Record<string, string> = {
   'package.json': '{"name":"root"}',
@@ -68,6 +70,47 @@ test('git status with renames, staged and untracked files, and diff colours', ()
   expect(rows.map(r => r[0]!.t)).toEqual(['@@ -1 +1 @@', '-a', '+b'])
 })
 
+const V = { mode: 'files' as const, scope: '', focus: '', depth: 1, local: true, orphans: false, cap: 350 }
+
+test('a scope keeps its files and folds the rest into the folder they leave by', () => {
+  expect(bucket('apps/web', 'apps/api/x.ts')).toBe('apps/api')
+  expect(bucket('apps/web', 'packages/engine/src/a.ts')).toBe('packages')
+  const v = view(build(REPO), { ...V, scope: 'apps/web' })
+  expect(v.nodes.map(n => n.id).sort()).toEqual(['apps/web/app/page.tsx', 'apps/web/lib/util.ts', 'out:packages'])
+  expect(v.edges.some(e => e.a === 'apps/web/app/page.tsx' && e.b === 'out:packages')).toBe(true)
+})
+
+test('folders mode draws child folders as nodes with links between them', () => {
+  const v = view(build(REPO), { ...V, mode: 'folders' })
+  const ids = v.nodes.map(n => n.id)
+  expect(ids).toContain('apps')
+  expect(ids).toContain('packages')
+  expect(v.edges.some(e => e.a === 'apps' && e.b === 'packages')).toBe(true)
+  expect(view(build(REPO), { ...V, mode: 'folders', scope: 'apps' }).nodes.map(n => n.id)).toContain('apps/web')
+})
+
+test('depth widens the focus ring; depth 1 shows direct links only', () => {
+  const chain = { 'a.ts': "import './b'\n", 'b.ts': "import './c'\n", 'c.ts': "import './d'\n", 'd.ts': '' }
+  const g = build(chain)
+  const at = (depth: number) => view(g, { ...V, focus: 'a.ts', depth }).nodes.map(n => n.id).sort()
+  expect(at(1)).toEqual(['a.ts', 'b.ts'])
+  expect(at(2)).toEqual(['a.ts', 'b.ts', 'c.ts'])
+  const v = view(g, { ...V, focus: 'b.ts', depth: 1 })
+  expect([...v.out]).toEqual(['c.ts'])
+  expect([...v.inn]).toEqual(['a.ts'])
+})
+
+test('the painter draws soft lines and round dots on a clear background', () => {
+  const c = new Canvas(40, 20)
+  c.line({ x0: 2, y0: 10, x1: 38, y1: 10, c: [255, 0, 0], a: 1, w: 1 })
+  c.dot({ x: 20, y: 10, r: 4, c: [0, 255, 0], a: 1 })
+  const px = (x: number, y: number) => [...c.px.slice((y * 40 + x) * 4, (y * 40 + x) * 4 + 4)]
+  expect(px(0, 0)[3]).toBe(0)
+  expect(px(5, 10)[0]).toBeGreaterThan(200)
+  expect(px(20, 10)[1]).toBe(255)
+  expect(px(5, 12)[3]).toBe(0)
+})
+
 const STATUS = ' M api/main.py\0?? notes/new.ts\0'
 const NUMSTAT = '2\t1\tapi/main.py\n'
 const DIFF = 'diff --git a/api/main.py b/api/main.py\n--- a/api/main.py\n+++ b/api/main.py\n@@ -1,3 +1,4 @@\n-old line\n+new line\n+another\n context\n'
@@ -104,11 +147,21 @@ test('the pane scans the repo, shows the graph, and the tabs swap views', { time
   const props = { title: 'Repo graph', isFocused: true, bodyColumns: 70, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as any
   const ui = await $.ui.mount({ plugin: 'repograph', surface: 'terminal', component: 'Pane', requestId: 'repograph', props })
   await clock.settle()
-  const drawn = async () => JSON.stringify(await ui.drawn()) + JSON.stringify(await ui.drawn({ in: 'canvas' }))
+  const drawn = async () => JSON.stringify(await ui.drawn()) + JSON.stringify(await ui.drawn({ in: 'canvas' }).catch(() => ''))
   let shown = await drawn()
   for (const word of ['Files', 'Graph', '6 files', 'links', '1 unlinked hidden']) expect(shown).toContain(word)
 
-  await ui.post({ key: '1' }, { in: 'canvas' })
+  expect(shown).toContain('"type":"Image"')
+  // Click a node: find its label laid over the picture and click just left of it.
+  const tree = JSON.stringify(await ui.drawn())
+  const pos = /"position":"absolute","top":(\d+),"left":(\d+)\},"children":\[\{"type":"Text","props":\{[^}]*\},"children":\["models\.py"\]/.exec(tree)
+  expect(pos).toBeTruthy()
+  await ui.post({ press: [Number(pos![2]) - 1.5, Number(pos![1]) + 0.5] }, { in: 'graph' })
+  await ui.post({ release: true }, { in: 'graph' })
+  await clock.settle()
+  expect(await drawn()).toContain('← used by (1): api/main.py')
+  await ui.post({ key: 'escape' }, { in: 'graph' })
+  await ui.post({ key: '1' }, { in: 'graph' })
   await clock.settle()
   shown = await drawn()
   for (const word of ['packages', 'apps', 'api', 'scripts', 'README.md', '10 files']) expect(shown).toContain(word)
@@ -124,12 +177,17 @@ test('the pane scans the repo, shows the graph, and the tabs swap views', { time
   expect(shown).toContain('api/main.py')
   expect(shown).toContain('imports (1): api/models.py')
 
-  await ui.post({ key: 'm' }, { in: 'canvas' })
+  // Depth: one more ring, then back.
+  await ui.post({ key: ']' }, { in: 'graph' })
+  await clock.settle()
+  expect(await drawn()).toContain(' depth 2 ')
+  await ui.post({ key: '[' }, { in: 'graph' })
+  await ui.post({ key: 'm' }, { in: 'graph' })
   await clock.settle()
   expect(await drawn()).toContain('calls (1)')
 
   // Changes: the list, the diff of the first file, and reviewing it.
-  await ui.post({ key: '3' }, { in: 'canvas' })
+  await ui.post({ key: '3' }, { in: 'graph' })
   await clock.settle()
   const changes = async () => JSON.stringify(await ui.drawn()) + JSON.stringify(await ui.drawn({ in: 'list' })) + JSON.stringify(await ui.drawn({ in: 'diff' }))
   shown = await changes()

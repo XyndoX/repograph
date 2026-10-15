@@ -1,20 +1,23 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { build, CODE, type Graph, type Node } from './scan'
-import { layout, nearest, raster, type Pos, type Seg } from './layout'
+import { build, CODE, type Graph } from './scan'
+import type { Seg } from './layout'
 import { treeRows, type Row } from './tree'
 import { type Change, diffRows, readChanges, readDiff, stamp, STATUS_COLOR } from './changes'
+import { draw, IN, OUT, PALETTE, type Drawn } from './graph'
+import { cellSize } from './paint'
+import type { Mode } from './view'
 import type { CanvasProps } from './canvas'
+import type { OverlayProps } from './overlay'
 
 const PANE = 'repograph'
 const MAX_FILES = 4000
 const MAX_BYTES = 400_000
-const GLOBAL_CAP = 350 // the global graph keeps the best-connected nodes
+const GLOBAL_CAP = 350 // the whole-repo graph keeps the best-connected nodes
 const POLL_MS = 2500 // the Changes tab rereads git this often, to show edits while the agent works
-const PALETTE = ['#a882ff', '#53dfdd', '#e5c07b', '#98c379', '#e06c75', '#61afef', '#d19a66', '#c678dd', '#56b6c2', '#ff79c6']
-const C = { fg: '#dadada', muted: '#6b6b6b', edge: '#4a4a52', hot: '#a882ff', dim: '#3a3a3a', touched: '#f5a623', sel: '#2e2a3d', ok: '#98c379' }
+const MODES: Mode[] = ['folders', 'files', 'functions']
+const C = { fg: '#dadada', muted: '#6b6b6b', hot: '#a882ff', touched: '#f5a623', sel: '#2e2a3d', ok: '#98c379' }
 
 type Tab = 'files' | 'graph' | 'changes'
-type Mode = 'files' | 'functions'
 
 const S = {
   root: '',
@@ -24,20 +27,26 @@ const S = {
   stale: false,
   error: '',
   tab: 'graph' as Tab,
+  // Graph tab
   mode: 'files' as Mode,
+  scope: '', // a folder: the graph shows what's inside, and what it links to outside
   focus: '',
-  center: '',
-  local: false,
+  hover: '',
+  local: true, // a focus narrows the graph to its neighbourhood
   orphans: false,
   depth: 1,
-  view: { cx: 0.5, cy: 0.5, z: 1 },
+  pixels: true,
+  cam: { cx: 0.5, cy: 0.5, z: 1 },
+  center: '',
+  pendingClear: false,
+  drawn: null as Drawn | null,
+  box: { cols: 60, rows: 20 },
+  // Files tab
   expanded: new Set<string>(),
   cursor: '',
   top: 0,
-  touched: new Set<string>(),
-  hits: [] as { id: string; x: number; y: number }[],
   tree: [] as Row[],
-  canvas: { cols: 60, rows: 20 },
+  touched: new Set<string>(),
   // Changes tab
   changes: [] as Change[],
   sel: '',
@@ -50,8 +59,8 @@ const S = {
   reading: false,
   poll: null as { cancel: () => void } | null,
 }
-let cache = { key: '', pos: new Map() as Pos }
 const redraw = ($: EngineInterface) => $.ui.invalidate('ui.render')
+const resetCam = () => { S.cam = { cx: 0.5, cy: 0.5, z: 1 } }
 
 async function topOf($: EngineInterface): Promise<string> {
   const cwd = await $.session.cwd()
@@ -79,12 +88,17 @@ async function scan($: EngineInterface) {
         } catch { /* deleted or unreadable: skip */ }
       }),
     )
-    if (root !== S.root) Object.assign(S, { focus: '', cursor: '', top: 0, expanded: new Set<string>(), view: { cx: 0.5, cy: 0.5, z: 1 }, sel: '', reviewed: new Map() })
+    const fresh = root !== S.root
+    S.graph = build(texts)
+    if (fresh) {
+      Object.assign(S, { focus: '', scope: '', cursor: '', top: 0, expanded: new Set<string>(), sel: '', reviewed: new Map() })
+      resetCam()
+      // A big repo opens on its folders: a map first, the streets when you zoom in.
+      S.mode = S.graph.files.length > 120 ? 'folders' : 'files'
+    }
     S.root = root
     S.files = all
-    S.graph = build(texts)
     S.stale = false
-    cache = { key: '', pos: new Map() }
   } catch (err) {
     S.error = err instanceof Error ? err.message : String(err)
   } finally {
@@ -109,85 +123,50 @@ async function refreshChanges($: EngineInterface) {
     if (!list.some(c => c.path === S.sel)) { S.sel = list[0]?.path ?? ''; S.diffTop = 0 }
     const cur = list.find(c => c.path === S.sel)
     const text = cur ? await readDiff(run, S.root, cur) : ''
-    if (text !== S.diffText) { S.diffText = text; S.diff = diffRows(text, S.canvas.cols) }
+    if (text !== S.diffText) { S.diffText = text; S.diff = diffRows(text, S.box.cols) }
   } catch { /* git busy or gone: try again on the next tick */ } finally {
     S.reading = false
     redraw($)
   }
 }
 
-// What the graph tab shows right now: nodes, edges, and who is near the focus.
-function visible(g: Graph) {
-  const nodes = S.mode === 'files' ? g.files : g.fns
-  const edges = S.mode === 'files' ? g.fileEdges : g.fnEdges
-  const byId = new Map(nodes.map(n => [n.id, n]))
-  const adj = new Map<string, Set<string>>()
-  const link = (a: string, b: string) => adj.set(a, (adj.get(a) ?? new Set()).add(b))
-  for (const [a, b] of edges) { link(a, b); link(b, a) }
-  // In functions mode a file focus stands for all of its functions.
-  const seeds = !S.focus ? [] : byId.has(S.focus) ? [S.focus] : nodes.filter(n => n.file === S.focus).map(n => n.id)
-  const near = new Set(seeds)
-  let ring = seeds
-  for (let d = 0; d < S.depth; d++) {
-    ring = ring.flatMap(id => [...(adj.get(id) ?? [])]).filter(id => !near.has(id))
-    for (const id of ring) near.add(id)
-  }
-  const deg = (id: string) => adj.get(id)?.size ?? 0
-  let ids: string[]
-  if (S.local && seeds.length) ids = [...near]
-  else {
-    ids = nodes.map(n => n.id).filter(id => S.orphans || deg(id) > 0 || near.has(id))
-    if (ids.length > GLOBAL_CAP) {
-      const keep = new Set([...ids].sort((a, b) => deg(b) - deg(a)).slice(0, GLOBAL_CAP))
-      for (const id of near) keep.add(id)
-      ids = ids.filter(id => keep.has(id))
-    }
-  }
-  const shown = new Set(ids)
-  const hidden = S.local && seeds.length ? 0 : nodes.filter(n => !S.orphans && deg(n.id) === 0 && !near.has(n.id)).length
-  return { nodes: ids.map(id => byId.get(id)!), edges: edges.filter(([a, b]) => shown.has(a) && shown.has(b)), near, seeds, deg, hidden }
-}
-
 const groupsOf = (g: Graph) => [...new Set(g.files.map(n => n.group))].sort()
 const groupColor = (groups: string[]) => (group: string) => PALETTE[Math.max(0, groups.indexOf(group)) % PALETTE.length]!
-
-function drawGraph(g: Graph, cols: number, rows: number) {
-  const v = visible(g)
-  const key = `${S.mode}|${S.local}|${S.orphans}|${S.depth}|${S.local ? S.focus : ''}|${v.nodes.length}|${v.edges.length}`
-  if (cache.key !== key) cache = { key, pos: layout(v.nodes.map(n => n.id), v.edges) }
-  // A focus picked from Files, search or Changes: bring it to the middle.
-  if (S.center) {
-    const id = cache.pos.has(S.center) ? S.center : v.seeds.find(s => cache.pos.has(s))
-    const p = id ? cache.pos.get(id) : undefined
-    if (p) S.view = { ...S.view, cx: p[0], cy: p[1] }
-    S.center = ''
-  }
-  const color = groupColor(groupsOf(g))
-  const byId = new Map(v.nodes.map(n => [n.id, n]))
-  const focusId = v.seeds.length === 1 ? v.seeds[0]! : ''
-  const ranked = [...v.nodes].sort((a, b) => v.deg(b.id) - v.deg(a.id))
-  const big = new Set(ranked.slice(0, Math.max(3, Math.round(ranked.length / 12))).map(n => n.id))
-  const labels = [...v.seeds, ...(S.focus ? [...v.near].filter(id => !v.seeds.includes(id)) : []), ...ranked.map(n => n.id)].filter((id, i, a) => a.indexOf(id) === i)
-  const tint = (n: Node) => (S.touched.has(n.file) ? C.touched : color(n.group))
-  const out = raster(
-    { pos: cache.pos, edges: v.edges, focus: focusId, near: v.near, labels: labels.slice(0, S.focus ? 40 : 18), names: new Map(v.nodes.map(n => [n.id, n.label])), big },
-    cols,
-    rows,
-    S.view,
-    { color: id => tint(byId.get(id)!), edge: C.edge, hot: C.hot, dim: C.dim, label: C.fg },
-  )
-  S.hits = out.hits
-  return { rows: out.rows, v }
-}
 
 function setFocus(id: string, center = false) {
   S.focus = id
   if (center) S.center = id
-  if (S.local) cache.key = ''
+}
+
+// Scope the graph to a folder; '' is the whole repo.
+function setScope(folder: string) {
+  S.scope = folder.replace(/\/$/, '')
+  S.focus = ''
+  resetCam()
+  // A folder with no subfolders has nothing to show as folders.
+  if (S.mode === 'folders' && !S.files.some(f => f.startsWith(S.scope + '/') && f.slice(S.scope.length + 1).includes('/'))) S.mode = 'files'
+}
+
+function scopeUp() {
+  if (!S.scope) return
+  setScope(S.scope.includes('/') ? S.scope.slice(0, S.scope.lastIndexOf('/')) : '')
+}
+
+// Clicking a focused folder node (or one outside the scope) steps into it.
+function open(id: string) {
+  const n = S.drawn?.v.nodes.find(x => x.id === id)
+  if (!n) return
+  if (n.kind === 'folder') return setScope(n.id)
+  if (n.kind === 'outside') {
+    const isDir = S.files.some(f => f.startsWith(n.file + '/'))
+    setScope(isDir ? n.file : n.file.includes('/') ? n.file.slice(0, n.file.lastIndexOf('/')) : '')
+  }
 }
 
 function showInGraph(file: string) {
   if (!S.graph?.files.some(f => f.id === file)) return false
+  if (S.scope && !file.startsWith(S.scope + '/')) setScope('')
+  if (S.mode === 'folders') S.mode = 'files'
   setFocus(file, true)
   S.tab = 'graph'
   return true
@@ -204,12 +183,15 @@ function find(q: string) {
   const g = S.graph
   const s = q.trim().toLowerCase()
   if (!g || !s) return
-  const nodes = S.mode === 'files' ? g.files : g.fns
+  const nodes = S.mode === 'functions' ? g.fns : g.files
   const hit =
     nodes.find(n => n.label.toLowerCase() === s) ??
     nodes.find(n => n.label.toLowerCase().startsWith(s)) ??
     nodes.find(n => n.id.toLowerCase().includes(s))
-  if (hit) setFocus(hit.id, true)
+  if (!hit) return
+  if (S.scope && !hit.file.startsWith(S.scope + '/')) setScope('')
+  if (S.mode === 'folders') S.mode = 'files'
+  setFocus(hit.id, true)
 }
 
 function selectChange(d: number) {
@@ -232,23 +214,29 @@ async function key($: EngineInterface, k: string) {
   else if (k === '3') { S.tab = 'changes'; void refreshChanges($) }
   else if (k === 'r') return void scan($)
   else if (S.tab === 'graph') {
-    const step = 0.12 / S.view.z
-    if (k === 'left') S.view.cx -= step
-    else if (k === 'right') S.view.cx += step
-    else if (k === 'up') S.view.cy -= step
-    else if (k === 'down') S.view.cy += step
-    else if (k === '+' || k === '=') S.view.z = Math.min(12, S.view.z * 1.25)
-    else if (k === '-' || k === '_') S.view.z = Math.max(0.3, S.view.z / 1.25)
-    else if (k === '0') S.view = { cx: 0.5, cy: 0.5, z: 1 }
-    else if (k === 'm') { S.mode = S.mode === 'files' ? 'functions' : 'files'; S.view = { cx: 0.5, cy: 0.5, z: 1 }; if (S.focus) S.center = S.focus.split('#')[0]! }
-    else if (k === 'g') { S.local = !S.local; S.view = { cx: 0.5, cy: 0.5, z: S.view.z }; if (S.focus) S.center = S.focus }
+    const step = 0.12 / S.cam.z
+    if (k === 'left') S.cam.cx -= step
+    else if (k === 'right') S.cam.cx += step
+    else if (k === 'up') S.cam.cy -= step
+    else if (k === 'down') S.cam.cy += step
+    else if (k === '+' || k === '=') S.cam.z = Math.min(12, S.cam.z * 1.25)
+    else if (k === '-' || k === '_') S.cam.z = Math.max(0.3, S.cam.z / 1.25)
+    else if (k === '0') resetCam()
+    else if (k === 'm') { S.mode = MODES[(MODES.indexOf(S.mode) + 1) % MODES.length]!; resetCam(); if (S.focus) S.center = S.focus.split('#')[0]! }
+    else if (k === ']') S.depth = Math.min(5, S.depth + 1)
+    else if (k === '[') S.depth = Math.max(1, S.depth - 1)
+    else if (k === 'g') { S.local = !S.local; resetCam(); if (S.focus) S.center = S.focus }
     else if (k === 'o') S.orphans = !S.orphans
-    else if (k === 'd') S.depth = S.depth === 1 ? 2 : 1
-    else if (k === 'escape') S.focus = ''
-    else if (k === 'return' && S.focus) { revealInTree(S.focus.split('#')[0]!); S.tab = 'files' }
-    else return
+    else if (k === 'p') S.pixels = !S.pixels
+    else if (k === 'u' || k === 'backspace') scopeUp()
+    else if (k === 'escape') { if (S.focus) S.focus = ''; else scopeUp() }
+    else if (k === 'return' && S.focus) {
+      const n = S.drawn?.v.nodes.find(x => x.id === S.focus)
+      if (n && (n.kind === 'folder' || n.kind === 'outside')) open(n.id)
+      else { revealInTree(S.focus.split('#')[0]!); S.tab = 'files' }
+    } else return
   } else if (S.tab === 'changes') {
-    const page = Math.max(1, S.canvas.rows - S.listRows - 2)
+    const page = Math.max(1, S.box.rows - S.listRows - 2)
     if (k === 'up' || k === 'k') selectChange(-1)
     else if (k === 'down' || k === 'j') selectChange(1)
     else if (k === 'K') S.diffTop = Math.max(0, S.diffTop - 3)
@@ -271,14 +259,15 @@ async function key($: EngineInterface, k: string) {
     const move = (d: number) => { S.cursor = S.tree[Math.max(0, Math.min(S.tree.length - 1, at + d))]?.id ?? S.cursor }
     if (k === 'up' || k === 'k') move(-1)
     else if (k === 'down' || k === 'j') move(1)
-    else if (k === 'pageup') move(-S.canvas.rows)
-    else if (k === 'pagedown') move(S.canvas.rows)
+    else if (k === 'pageup') move(-S.box.rows)
+    else if (k === 'pagedown') move(S.box.rows)
     else if (!row) return
     else if (k === 'right' || k === 'l') { if (row.dir) S.expanded.add(row.id) }
     else if (k === 'left' || k === 'h') {
       if (row.dir && S.expanded.has(row.id)) S.expanded.delete(row.id)
       else if (row.id.includes('/')) S.cursor = row.id.slice(0, row.id.lastIndexOf('/'))
-    } else if (k === 'return' || k === ' ') pressRow(row)
+    } else if (k === 'g') { if (row.dir) { setScope(row.id); S.tab = 'graph' } else showInGraph(row.id) }
+    else if (k === 'return' || k === ' ') pressRow(row)
     else return
   }
   redraw($)
@@ -291,7 +280,7 @@ function pressRow(row: Row) {
   else S.expanded.add(row.id)
 }
 
-async function open($: EngineInterface) {
+async function openPane($: EngineInterface) {
   await $.ui.open({ id: PANE, title: 'Repo graph', focus: true, rows: 40, columns: 80 })
   S.poll ??= $.clock.every(POLL_MS, () => { if (S.tab === 'changes') void refreshChanges($) })
   let top = S.root
@@ -300,11 +289,10 @@ async function open($: EngineInterface) {
   else void refreshChanges($)
 }
 
-function names(ids: string[], g: Graph, width: number): string {
-  const label = new Map([...g.files, ...g.fns].map(n => [n.id, S.mode === 'files' ? n.id : n.label]))
+function names(ids: string[], label: (id: string) => string, width: number): string {
   let out = ''
   for (const [i, id] of ids.entries()) {
-    const next = (i ? ', ' : '') + (label.get(id) ?? id)
+    const next = (i ? ', ' : '') + label(id)
     if (out.length + next.length > width - 6) return `${out} +${ids.length - i}`
     out += next
   }
@@ -337,15 +325,17 @@ function changeRows(cols: number, rows: number): Seg[][] {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    await $.command.register({ name: 'repograph', description: 'Repo graph: files, dependencies and changes side by side; args: [files|functions|changes]' })
+    await $.command.register({ name: 'repograph', description: 'Repo graph: files, dependencies and changes side by side; args: [folders|files|functions|changes|<folder>]' })
     return r
   })
 
   on('command.run', { command: 'repograph' }, async ($, e) => {
-    const arg = (e.args ?? '').trim()
-    if (arg === 'functions' || arg === 'files') { S.mode = arg; S.tab = 'graph' }
-    if (arg === 'changes') S.tab = 'changes'
-    await open($)
+    const arg = (e.args ?? '').trim().replace(/\/$/, '')
+    await openPane($)
+    if (arg === 'functions' || arg === 'files' || arg === 'folders') { S.mode = arg; S.tab = 'graph' }
+    else if (arg === 'changes') S.tab = 'changes'
+    else if (arg) { setScope(arg); S.tab = 'graph' }
+    redraw($)
     return { text: 'Repo graph: 1 files · 2 graph · 3 changes. Click the pane to give it the keys.' }
   })
 
@@ -371,33 +361,50 @@ export const register: Register = on => {
   })
 
   on('ui.message', async ($, e, next) => {
-    if (e.requestId !== PANE || !['canvas', 'list', 'diff'].includes(String(e.element)) || !e.data || typeof e.data !== 'object') return next(e)
-    const data = e.data as { key?: string; click?: [number, number]; drag?: [number, number] }
+    if (e.requestId !== PANE || !['canvas', 'list', 'diff', 'graph'].includes(String(e.element)) || !e.data || typeof e.data !== 'object') return next(e)
+    const data = e.data as { key?: string; press?: [number, number]; release?: boolean; click?: [number, number]; drag?: [number, number]; hover?: [number, number] | null }
     if (typeof data.key === 'string') await key($, data.key)
     else if (data.click && e.element === 'list') {
-      const c = S.changes[S.listTop + data.click[1]]
+      const c = S.changes[S.listTop + Math.floor(data.click[1])]
       if (c && c.path === S.sel && data.click[0] < 2) toggleReviewed(c.path)
       else if (c) { S.sel = c.path; S.diffTop = 0; S.diffText = ''; S.diff = []; void refreshChanges($) }
       redraw($)
+    } else if (data.press && S.tab === 'graph') {
+      // A press on a node acts at once; a press on empty space clears the focus
+      // only if it ends without a drag (a drag pans instead).
+      const id = S.drawn?.hit(data.press[0], data.press[1]) ?? ''
+      S.pendingClear = !id
+      if (id && id === S.focus) open(id)
+      else if (id) setFocus(id)
+      redraw($)
+    } else if (data.release && S.tab === 'graph') {
+      if (S.pendingClear) { S.focus = ''; redraw($) }
+      S.pendingClear = false
     } else if (data.click && S.tab === 'graph') {
-      const id = nearest(S.hits, data.click[0], data.click[1])
-      setFocus(id === S.focus ? '' : id)
+      const id = S.drawn?.hit(data.click[0], data.click[1]) ?? ''
+      if (id && id === S.focus) open(id)
+      else setFocus(id)
       redraw($)
     } else if (data.click && S.tab === 'files') {
-      const row = S.tree[S.top + data.click[1]]
+      const row = S.tree[S.top + Math.floor(data.click[1])]
       if (row) pressRow(row)
       redraw($)
     } else if (data.drag && S.tab === 'graph') {
-      const scale = Math.min(S.canvas.cols * 2, S.canvas.rows * 4) * S.view.z
-      S.view.cx -= (data.drag[0] * 2) / scale
-      S.view.cy -= (data.drag[1] * 4) / scale
+      S.pendingClear = false
+      const { cw, ch } = S.pixels ? cellSize(S.box.cols, S.box.rows) : { cw: 2, ch: 4 }
+      const scale = Math.min(S.box.cols * cw, S.box.rows * ch) * (S.pixels ? 0.92 : 1) * S.cam.z
+      S.cam.cx -= (data.drag[0] * cw) / scale
+      S.cam.cy -= (data.drag[1] * ch) / scale
       redraw($)
+    } else if ('hover' in data && S.tab === 'graph') {
+      const id = data.hover ? (S.drawn?.hit(data.hover[0], data.hover[1]) ?? '') : ''
+      if (id !== S.hover) { S.hover = id; redraw($) }
     }
     return {}
   })
 
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    if (S.tab === 'graph') S.view.z = Math.max(0.3, Math.min(12, S.view.z * (e.by < 0 ? 1.15 : 1 / 1.15)))
+    if (S.tab === 'graph') S.cam.z = Math.max(0.3, Math.min(12, S.cam.z * (e.by < 0 ? 1.06 : 1 / 1.06)))
     else if (S.tab === 'changes') S.diffTop = Math.max(0, S.diffTop + Math.sign(e.by) * 3)
     else S.top = Math.max(0, S.top + Math.sign(e.by) * 3)
     redraw($)
@@ -406,7 +413,8 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
-    const { Box, Text, Button, Input, Client } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Client } = ui
     const cols = Math.max(30, (e.props?.bodyColumns ?? 80) - 1)
     const height = Math.max(12, e.props?.scroll?.bodyRows ?? 36)
     const g = S.graph
@@ -420,10 +428,6 @@ export const register: Register = on => {
         {tab('graph', 'Graph')}
         {tab('changes', S.changes.length ? `Changes ${open}/${S.changes.length}` : 'Changes')}
         <Box flexGrow={1} />
-        {S.tab === 'graph' && <Button key="mode" plain dimColor label={S.mode === 'files' ? 'files ⇄' : 'functions ⇄'} onPress={() => void key($, 'm')} />}
-        {S.tab === 'graph' && <Text> </Text>}
-        {S.tab === 'graph' && <Button key="local" plain dimColor={!S.local} label={S.local ? `local·${S.depth}` : 'global'} onPress={() => void key($, 'g')} />}
-        <Text> </Text>
         <Button key="rescan" plain dimColor label={S.scanning ? '…' : '↻'} onPress={() => void scan($)} />
       </Box>
     )
@@ -442,21 +446,20 @@ export const register: Register = on => {
 
     if (S.tab === 'files') {
       const rows = Math.max(4, height - 2)
-      S.canvas = { cols, rows }
-      const groups = groupsOf(g)
-      const t = treeRows(S.files, g.fileEdges, S, groupColor(groups), C, cols, rows)
+      S.box = { cols, rows }
+      const t = treeRows(S.files, g.fileEdges, S, groupColor(groupsOf(g)), C, cols, rows)
       S.tree = t.list
       return frame(
         <Client key="canvas" module="./canvas.tsx" props={{ rows: t.rows } satisfies CanvasProps} />,
         <Box flexGrow={1} />,
-        <Text color={C.muted} wrap="truncate-end">{`${S.files.length} files · ←used by →imports · enter: show in graph`}</Text>,
+        <Text color={C.muted} wrap="truncate-end">{`${S.files.length} files · ←used by →imports · enter: open / show · g: graph this folder`}</Text>,
       )
     }
 
     if (S.tab === 'changes') {
       S.listRows = Math.max(1, Math.min(S.changes.length, Math.max(3, Math.floor((height - 4) / 3))))
       const diffRowsN = Math.max(3, height - 3 - S.listRows)
-      S.canvas = { cols, rows: height - 1 }
+      S.box = { cols, rows: height - 1 }
       if (!S.changes.length) {
         return frame(<Text color={C.muted}>{S.reading ? 'Reading git…' : 'No changes since the last commit.'}</Text>, <Box flexGrow={1} />, <Text color={C.muted}>{`watching git every ${POLL_MS / 1000}s`}</Text>)
       }
@@ -477,40 +480,82 @@ export const register: Register = on => {
       )
     }
 
-    const rows = Math.max(6, height - 6)
-    S.canvas = { cols, rows }
-    const { rows: canvas, v } = drawGraph(g, cols, rows)
-    const edges = S.mode === 'files' ? g.fileEdges : g.fnEdges
-    const uniq = (ids: string[]) => [...new Set(ids)]
-    const out = uniq(v.seeds.flatMap(s => edges.filter(([a]) => a === s).map(([, b]) => b)).filter(id => !v.seeds.includes(id)))
-    const inn = uniq(v.seeds.flatMap(s => edges.filter(([, b]) => b === s).map(([a]) => a)).filter(id => !v.seeds.includes(id)))
-    const focusNode = [...g.files, ...g.fns].find(n => n.id === S.focus)
+    // Graph tab: the picture, labels laid over it as text, and an empty box over
+    // both that catches the pointer.
+    const rows = Math.max(6, height - 7)
+    S.box = { cols, rows }
+    const pixels = S.pixels && e.surface === 'terminal'
+    const input = { mode: S.mode, scope: S.scope, focus: S.focus, depth: S.depth, local: S.local, orphans: S.orphans, cap: GLOBAL_CAP }
+    let d = draw(g, input, S.cam, cols, rows, pixels, S.hover, S.touched)
+    if (S.center) {
+      const p = d.centre(S.center) ?? d.centre(d.v.seeds[0] ?? '')
+      S.center = ''
+      if (p) { S.cam.cx = p[0]; S.cam.cy = p[1]; d = draw(g, input, S.cam, cols, rows, pixels, S.hover, S.touched) }
+    }
+    S.drawn = d
+    const v = d.v
+    const nodeById = new Map(v.nodes.map(n => [n.id, n]))
+    const label = (id: string) => {
+      const n = nodeById.get(id)
+      return !n ? id : n.kind === 'fn' ? `${n.label}()` : n.kind === 'outside' ? `${n.label} (outside)` : n.file
+    }
+    const words = S.mode === 'functions' ? ['calls', 'called by'] : ['imports', 'used by']
+    const focusNode = nodeById.get(v.seeds[0] ?? '')
+    const hovered = nodeById.get(S.hover)
+    const Image = e.surface === 'terminal' ? ($.ui.resolve(e) as { Image?: (p: object) => unknown }).Image : undefined
+    const picture =
+      pixels && d.image && Image ? (
+        <Image key="graph-image" source={d.image} columns={cols} rows={rows} alt="repo graph" />
+      ) : (
+        <Client key="canvas" module="./canvas.tsx" props={{ rows: d.text ?? [] } satisfies CanvasProps} />
+      )
+    const crumbs = S.scope ? S.scope.split('/') : []
     const groups = groupsOf(g)
-    const color = groupColor(groups)
-    const legend = (
-      <Box flexDirection="row" overflow="hidden" height={1}>
-        {groups.slice(0, 10).map(gr => (
-          <Text color={color(gr)}>{`■ ${gr}  `}</Text>
-        ))}
-      </Box>
-    )
     const lines = S.focus
       ? [
-          <Text bold color={C.hot} wrap="truncate-start">{focusNode ? (S.mode === 'files' ? focusNode.id : `${focusNode.label}()  ${focusNode.file}`) : S.focus}</Text>,
-          <Text color={C.fg} wrap="truncate-end">{`${S.mode === 'files' ? 'imports' : 'calls'} (${out.length}): ${names(out, g, cols)}`}</Text>,
-          <Text color={C.fg} wrap="truncate-end">{`${S.mode === 'files' ? 'used by' : 'called by'} (${inn.length}): ${names(inn, g, cols)}`}</Text>,
+          <Text bold color="#ffffff" wrap="truncate-start">{focusNode ? label(focusNode.id) : S.focus}</Text>,
+          <Text color={OUT} wrap="truncate-end">{`→ ${words[0]} (${v.out.size}): ${names([...v.out], label, cols)}`}</Text>,
+          <Text color={IN} wrap="truncate-end">{`← ${words[1]} (${v.inn.size}): ${names([...v.inn], label, cols)}`}</Text>,
         ]
       : [
-          <Text color={C.fg} wrap="truncate-end">{`${v.nodes.length} ${S.mode === 'files' ? 'files' : 'functions'} · ${v.edges.length} links${v.hidden ? ` · ${v.hidden} unlinked hidden (o)` : ''}${(S.mode === 'files' ? g.files : g.fns).length - v.hidden > v.nodes.length ? ` · top ${v.nodes.length} by links` : ''}`}</Text>,
-          <Text color={C.muted} wrap="truncate-end">{`hubs: ${names([...v.nodes].sort((a, b) => v.deg(b.id) - v.deg(a.id)).slice(0, 5).map(n => n.id), g, cols)}`}</Text>,
-          legend,
+          <Text color={hovered ? '#ffffff' : C.fg} wrap="truncate-end">
+            {hovered ? label(hovered.id) : `${v.nodes.length} ${S.mode} · ${v.edges.length} links${v.hidden ? ` · ${v.hidden} unlinked hidden (o)` : ''}${v.total - v.hidden > v.nodes.length ? ` · top ${v.nodes.length}` : ''}`}
+          </Text>,
+          <Text color={C.muted} wrap="truncate-end">{`hubs: ${names([...v.nodes].filter(n => n.kind !== 'outside').sort((a, b) => v.deg(b.id) - v.deg(a.id)).slice(0, 5).map(n => n.id), label, cols)}`}</Text>,
+          <Box flexDirection="row" overflow="hidden" height={1}>
+            {groups.slice(0, 10).map(gr => (
+              <Text color={groupColor(groups)(gr)}>{`● ${gr}  `}</Text>
+            ))}
+          </Box>,
         ]
     return frame(
-      <Input key="find" label="/ " placeholder={S.mode === 'files' ? 'find a file' : 'find a function'} submitLabel="focus" value="" onSubmit={(q: string) => { find(q); redraw($) }} />,
-      <Client key="canvas" module="./canvas.tsx" props={{ rows: canvas } satisfies CanvasProps} />,
+      <Box flexDirection="row">
+        <Button key="scope-root" plain dimColor={!!S.scope} bold={!S.scope} label="⌂ repo" onPress={() => { setScope(''); redraw($) }} />
+        {crumbs.map((c, i) => (
+          <Button key={`crumb-${i}`} plain dimColor={i < crumbs.length - 1} bold={i === crumbs.length - 1} label={` / ${c}`} onPress={() => { setScope(crumbs.slice(0, i + 1).join('/')); redraw($) }} />
+        ))}
+        <Box flexGrow={1} />
+        <Button key="mode" plain dimColor label={`${S.mode} ⇄`} onPress={() => void key($, 'm')} />
+        <Text> </Text>
+        <Button key="depth-down" plain dimColor label="‹" onPress={() => void key($, '[')} />
+        <Text color={C.fg}>{` depth ${S.depth} `}</Text>
+        <Button key="depth-up" plain dimColor label="›" onPress={() => void key($, ']')} />
+      </Box>,
+      <Input key="find" label="/ " placeholder={S.mode === 'functions' ? 'find a function' : 'find a file'} submitLabel="focus" value="" onSubmit={(q: string) => { find(q); redraw($) }} />,
+      <Box key="stage" position="relative" width={cols} height={rows}>
+        {picture}
+        {d.labels.map((l, i) => (
+          <Box key={`l${i}`} position="absolute" top={l.y} left={l.x}>
+            <Text color={l.color} bold={l.bold}>{l.text}</Text>
+          </Box>
+        ))}
+        <Box key="hit" position="absolute" top={0} left={0}>
+          <Client key="graph" module="./overlay.tsx" props={{ cols, rows } satisfies OverlayProps} />
+        </Box>
+      </Box>,
       ...lines,
       <Box flexGrow={1} />,
-      <Text color={C.muted} wrap="truncate-end">click node · drag · wheel/± zoom · 0 reset · m mode · g local · d depth · o unlinked · enter: files · esc</Text>,
+      <Text color={C.muted} wrap="truncate-end">click: focus · again: open folder · drag · wheel zoom · [ ] depth · m mode · u up · g near/all · o unlinked · p pixels/text · esc</Text>,
     )
   })
 }
