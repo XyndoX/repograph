@@ -1,0 +1,9 @@
+{
+  "name": "repograph",
+  "version": "0.1.0",
+  "description": "An Obsidian-style graph of your repo in a Claude Code pane: file imports and function calls, with a Files tab beside it",
+  "author": { "name": "XyndoX" },
+  "repository": "https://github.com/XyndoX/repograph",
+  "keywords": ["graph", "dependencies", "mod", "pane"],
+  "license": "MIT"
+}
