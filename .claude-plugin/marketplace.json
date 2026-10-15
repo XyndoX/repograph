@@ -2,5 +2,5 @@
   "name": "repograph",
   "description": "repograph: an Obsidian-style dependency graph pane for Claude Code",
   "owner": { "name": "XyndoX" },
-  "plugins": [{ "name": "repograph", "source": "./", "description": "Obsidian-style repo graph pane with Files and Graph tabs", "category": "productivity" }]
+  "plugins": [{ "name": "repograph", "source": "./", "description": "Obsidian-style repo graph, Files and lazygit-style Changes tabs", "category": "productivity" }]
 }

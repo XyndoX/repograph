@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { build } from '../hooks/scan'
 import { layout, nearest, raster } from '../hooks/layout'
+import { applyNumstat, diffRows, parseStatus } from '../hooks/changes'
 
 const REPO: Record<string, string> = {
   'package.json': '{"name":"root"}',
@@ -59,6 +60,27 @@ test('raster draws dots, braille edges and labels, and clicks find the node', ()
   expect(nearest(out.hits, 0, 0)).toBe('')
 })
 
+test('git status with renames, staged and untracked files, and diff colours', () => {
+  const list = applyNumstat(parseStatus('R  new.ts\0old.ts\0M  a.ts\0 D gone.ts\0?? b.ts\0'), '3\t0\ta.ts\n-\t-\tlogo.png\n')
+  expect(list.map(c => `${c.status} ${c.path}`)).toEqual(['M a.ts', 'D gone.ts', 'R new.ts', '? b.ts'])
+  expect(list[0]!.add).toBe(3)
+  const rows = diffRows('diff --git a/x b/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n', 40)
+  expect(rows.map(r => r[0]!.t)).toEqual(['@@ -1 +1 @@', '-a', '+b'])
+})
+
+const STATUS = ' M api/main.py\0?? notes/new.ts\0'
+const NUMSTAT = '2\t1\tapi/main.py\n'
+const DIFF = 'diff --git a/api/main.py b/api/main.py\n--- a/api/main.py\n+++ b/api/main.py\n@@ -1,3 +1,4 @@\n-old line\n+new line\n+another\n context\n'
+function git(argv: string[], root: string) {
+  if (argv.includes('rev-parse')) return ok(root + '\n')
+  if (argv.includes('ls-files')) return ok(Object.keys(REPO).join('\0'))
+  if (argv.includes('status')) return ok(STATUS)
+  if (argv.includes('--numstat')) return ok(NUMSTAT)
+  if (argv.includes('--no-index')) return { value: { exitCode: 1, stdout: '@@ -0,0 +1 @@\n+export const fresh = 1\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  if (argv.includes('diff')) return ok(DIFF)
+  return ok('')
+}
+
 const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
 
 test('the pane scans the repo, shows the graph, and the tabs swap views', { timeoutMs: 20_000 }, async ($, on) => {
@@ -69,7 +91,7 @@ test('the pane scans the repo, shows the graph, and the tabs swap views', { time
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('process.run', (_$: any, e: any) => (e.argv.includes('ls-files') ? ok(Object.keys(REPO).join('\0')) : ok('')))
+  on('process.run', (_$: any, e: any) => git(e.argv, root))
   on('fs.read', (_$: any, e: any) => {
     const rel = String(e.path).slice(root.length + 1)
     if (rel in REPO) return { value: REPO[rel] }
@@ -89,7 +111,7 @@ test('the pane scans the repo, shows the graph, and the tabs swap views', { time
   await ui.post({ key: '1' }, { in: 'canvas' })
   await clock.settle()
   shown = await drawn()
-  for (const word of ['packages', 'apps', 'api', 'scripts', '7 files']) expect(shown).toContain(word)
+  for (const word of ['packages', 'apps', 'api', 'scripts', 'README.md', '10 files']) expect(shown).toContain(word)
 
   // Open api/ and pick main.py: the graph tab comes back focused on it.
   await ui.post({ key: 'down' }, { in: 'canvas' }) // dirs first: api, apps, packages
@@ -105,5 +127,18 @@ test('the pane scans the repo, shows the graph, and the tabs swap views', { time
   await ui.post({ key: 'm' }, { in: 'canvas' })
   await clock.settle()
   expect(await drawn()).toContain('calls (1)')
+
+  // Changes: the list, the diff of the first file, and reviewing it.
+  await ui.post({ key: '3' }, { in: 'canvas' })
+  await clock.settle()
+  const changes = async () => JSON.stringify(await ui.drawn()) + JSON.stringify(await ui.drawn({ in: 'list' })) + JSON.stringify(await ui.drawn({ in: 'diff' }))
+  shown = await changes()
+  for (const word of ['Changes 2/2', 'api/main.py', 'notes/new.ts', '+2', '-1', ' new', '+new line', '-old line', '@@ -1,3 +1,4 @@']) expect(shown).toContain(word)
+  expect(shown).not.toContain('+++ b/api/main.py')
+  await ui.post({ key: ' ' }, { in: 'list' })
+  await clock.settle()
+  shown = await changes()
+  expect(shown).toContain('Changes 1/2')
+  expect(shown).toContain('+export const fresh = 1')
   await ui.unmount()
 })
