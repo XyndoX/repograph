@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b1630"/>
+      <stop offset="1" stop-color="#09070f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <svg x="110" y="150" width="340" height="340" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#231d38"/>
+      <stop offset="1" stop-color="#0e0b18"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#a882ff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#a882ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="hub" cx="0.38" cy="0.32" r="0.75">
+      <stop offset="0" stop-color="#cdb6ff"/>
+      <stop offset="1" stop-color="#8a5cf6"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="96" fill="url(#ink)"/>
+  <rect x="2" y="2" width="508" height="508" rx="94" fill="none" stroke="#a882ff" stroke-opacity="0.22" stroke-width="4"/>
+
+  <!-- links -->
+  <g stroke-width="14" stroke-linecap="round" fill="none">
+    <line x1="256" y1="262" x2="138" y2="146" stroke="#53dfdd" stroke-opacity="0.7"/>
+    <line x1="256" y1="262" x2="388" y2="150" stroke="#a882ff" stroke-opacity="0.75"/>
+    <line x1="256" y1="262" x2="392" y2="384" stroke="#a882ff" stroke-opacity="0.75"/>
+    <line x1="256" y1="262" x2="136" y2="380" stroke="#f5a623" stroke-opacity="0.7"/>
+    <line x1="388" y1="150" x2="392" y2="384" stroke="#6f6795" stroke-opacity="0.8"/>
+  </g>
+
+  <!-- hub: the focused file -->
+  <circle cx="256" cy="262" r="128" fill="url(#halo)"/>
+  <circle cx="256" cy="262" r="62" fill="url(#hub)"/>
+
+  <!-- neighbours: used by (teal), imports (purple), edited by Claude (orange) -->
+  <circle cx="138" cy="146" r="36" fill="#53dfdd"/>
+  <circle cx="388" cy="150" r="38" fill="#a882ff"/>
+  <circle cx="392" cy="384" r="32" fill="#a882ff"/>
+  <circle cx="136" cy="380" r="40" fill="#f5a623"/>
+  </svg>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif">
+    <text x="540" y="300" font-size="112" font-weight="700" fill="#f2eeff" letter-spacing="-2">repograph</text>
+    <text x="544" y="370" font-size="38" fill="#c8c0e6">A live map of your repo inside Claude Code</text>
+    <g font-size="28" font-weight="600">
+      <circle cx="556" cy="436" r="10" fill="#53dfdd"/><text x="576" y="446" fill="#53dfdd">Files</text>
+      <circle cx="686" cy="436" r="10" fill="#a882ff"/><text x="706" y="446" fill="#a882ff">Graph</text>
+      <circle cx="830" cy="436" r="10" fill="#f5a623"/><text x="850" y="446" fill="#f5a623">Changes</text>
+    </g>
+  </g>
+</svg>

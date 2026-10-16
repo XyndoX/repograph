@@ -1,6 +1,33 @@
-# repograph
+<p align="center">
+  <img src="assets/logo.svg" width="160" alt="repograph logo — a dependency graph: a hub file and its linked files">
+</p>
+
+<h1 align="center">repograph</h1>
+
+<p align="center">
+  <em>A live map of your repo inside Claude Code.</em>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Claude%20Code-mod-a882ff?style=flat-square" alt="Claude Code mod">
+  <img src="https://img.shields.io/badge/dependencies-0-53dfdd?style=flat-square" alt="Zero dependencies">
+  <img src="https://img.shields.io/github/license/XyndoX/repograph?style=flat-square&color=f5a623" alt="MIT license">
+</p>
+
+---
 
 A Claude Code mod that puts your repo in a side pane with three tabs: **Files**, an Obsidian-style **Graph** of its dependencies, and a lazygit-style **Changes** view to review what your agent is editing while it works.
+
+## Install
+
+```text
+claude plugin marketplace add XyndoX/repograph
+claude plugin install repograph@repograph --scope user
+```
+
+Then `/tui fullscreen` (the pane docks to the right) and `/repograph` (or `/repograph functions`, `/repograph changes`). Click the pane once to give it the keyboard.
+
+## What you get
 
 - **Graph tab**: drawn in real pixels in terminals with the kitty graphics protocol (**Ghostty, cmux, kitty**): soft anti-aliased lines, round nodes, labels as crisp terminal text on top. Elsewhere (tmux, iTerm2) `p` switches to a braille text drawing.
   - Three levels, `m` cycles them: **folders** (a map of the repo: each folder one node, links summed), **files** (imports), **functions** (calls). A big repo opens on folders.
@@ -12,15 +39,6 @@ A Claude Code mod that puts your repo in a side pane with three tabs: **Files**,
 - `/` search box: type a file or function name, Enter focuses and centres it.
 - **Changes tab**: every file changed since the last commit (tracked edits first, untracked folders as one row) with `+`/`-` counts, and the selected file's diff below. It rereads git every 2.5 s and after each tool call, so you can review while the agent works. `space` marks a file reviewed (✓); if the agent edits it again it reopens (●). The tab title counts what's still open: `Changes 3/5`.
 - Files Claude edits turn orange, and the graph rescans after the turn.
-
-## Install
-
-```text
-claude plugin marketplace add XyndoX/repograph
-claude plugin install repograph@repograph --scope user
-```
-
-Then `/tui fullscreen` (the pane docks to the right) and `/repograph` (or `/repograph functions`, `/repograph changes`). Click the pane once to give it the keyboard.
 
 ## Keys
 
